@@ -171,8 +171,7 @@ export function pinEntry(
               id="pin"
               name="pin"
               type="password"
-              inputmode="numeric"
-              pattern="[0-9]*"
+              minlength="4"
               autocomplete="current-password"
               style="font-size:2rem;letter-spacing:0.5rem;text-align:center;"
               required
