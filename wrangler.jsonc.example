@@ -1,0 +1,13 @@
+{
+  "name": "cf-simple-oidc",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-27",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "family-oidc-db",
+      "database_id": "YOUR_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
