@@ -152,3 +152,39 @@ export async function unlockAttempt(
     .bind(key)
     .run();
 }
+
+export async function createAdminSession(
+  db: D1Database,
+  token: string,
+  expiresAt: string
+): Promise<void> {
+  await db
+    .prepare("INSERT INTO admin_sessions (token, expires_at) VALUES (?, ?)")
+    .bind(token, expiresAt)
+    .run();
+}
+
+export async function validateAdminSession(
+  db: D1Database,
+  token: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "SELECT token FROM admin_sessions WHERE token = ? AND expires_at > datetime('now')"
+    )
+    .bind(token)
+    .first();
+  return row !== null;
+}
+
+export async function cleanExpiredSessions(db: D1Database): Promise<void> {
+  await db
+    .prepare("DELETE FROM admin_sessions WHERE expires_at < datetime('now')")
+    .run();
+}
+
+export async function cleanOldAttempts(db: D1Database): Promise<void> {
+  await db
+    .prepare("DELETE FROM login_attempts WHERE updated_at < datetime('now', '-10 days')")
+    .run();
+}

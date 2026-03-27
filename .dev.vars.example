@@ -2,3 +2,4 @@ ADMIN_PASSWORD=changeme
 CLIENT_ID=
 CLIENT_SECRET=
 SIGNING_KEY=
+ALLOWED_REDIRECT_URIS=https://your-team.cloudflareaccess.com/cdn-cgi/access/callback

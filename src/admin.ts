@@ -1,4 +1,4 @@
-import { hashPin, generateClientCredentials, checkAdminRateLimit, recordAdminFailedAttempt } from "./auth";
+import { hashPin, generateClientCredentials, checkAdminRateLimit, recordAdminFailedAttempt, timingSafeEqual } from "./auth";
 import {
   listProfiles,
   getProfile,
@@ -7,6 +7,9 @@ import {
   deleteProfile,
   listLoginAttempts,
   unlockAttempt,
+  createAdminSession,
+  validateAdminSession,
+  cleanExpiredSessions,
 } from "./db";
 import { generateKeyPair } from "./jwt";
 import {
@@ -25,13 +28,39 @@ interface Env {
   CLIENT_ID: string;
   CLIENT_SECRET: string;
   SIGNING_KEY: string;
+  ALLOWED_REDIRECT_URIS: string;
 }
 
-function adminAuthCheck(request: Request, env: Env): boolean {
+function getSessionToken(request: Request): string | null {
   const cookie = request.headers.get("Cookie") ?? "";
   const match = cookie.match(/(?:^|;\s*)admin_session=([^;]+)/);
-  if (!match) return false;
-  return match[1] === env.ADMIN_PASSWORD;
+  return match ? match[1] : null;
+}
+
+async function adminAuthCheck(request: Request, env: Env): Promise<boolean> {
+  const token = getSessionToken(request);
+  if (!token) return false;
+  return validateAdminSession(env.DB, token);
+}
+
+async function generateCsrfToken(sessionToken: string): Promise<string> {
+  const hash = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`csrf:${sessionToken}`)
+  );
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function validateCsrf(request: Request): Promise<boolean> {
+  const sessionToken = getSessionToken(request);
+  if (!sessionToken) return false;
+  const form = await request.clone().formData();
+  const token = form.get("_csrf") as string | null;
+  if (!token) return false;
+  const expected = await generateCsrfToken(sessionToken);
+  return timingSafeEqual(token, expected);
 }
 
 function redirect(location: string): Response {
@@ -44,9 +73,18 @@ function htmlResponse(body: string): Response {
   });
 }
 
-function requireAuth(request: Request, env: Env): Response | null {
-  if (!adminAuthCheck(request, env)) return redirect("/admin/login");
+async function requireAuth(request: Request, env: Env): Promise<Response | null> {
+  if (!(await adminAuthCheck(request, env))) return redirect("/admin/login");
   return null;
+}
+
+async function getCsrfToken(request: Request): Promise<string> {
+  const token = getSessionToken(request);
+  return token ? generateCsrfToken(token) : "";
+}
+
+function csrfForbidden(): Response {
+  return new Response("Forbidden — invalid CSRF token", { status: 403 });
 }
 
 export async function handleAdmin(
@@ -69,53 +107,61 @@ export async function handleAdmin(
     }
     const form = await request.formData();
     const password = form.get("password");
-    if (typeof password !== "string" || password !== env.ADMIN_PASSWORD) {
+    if (typeof password !== "string" || !timingSafeEqual(password, env.ADMIN_PASSWORD)) {
       const result = await recordAdminFailedAttempt(env.DB, ip);
       if (!result.allowed) {
         return htmlResponse(layout("Locked Out", lockoutPage(result.remainingMinutes ?? 60), { hideNav: true }));
       }
       return htmlResponse(layout("Admin Login", adminLogin("Invalid password."), { hideNav: true }));
     }
+    const sessionToken = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 86400 * 1000).toISOString().replace("Z", "");
+    await createAdminSession(env.DB, sessionToken, expiresAt);
+    await cleanExpiredSessions(env.DB);
     return new Response(null, {
       status: 302,
       headers: {
         Location: "/admin",
-        "Set-Cookie": `admin_session=${env.ADMIN_PASSWORD}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age=86400`,
+        "Set-Cookie": `admin_session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age=86400`,
       },
     });
   }
 
   if (path === "/admin" && method === "GET") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
+    const csrf = await getCsrfToken(request);
     const profiles = await listProfiles(env.DB);
-    return htmlResponse(layout("Profiles", adminProfileList(profiles)));
+    return htmlResponse(layout("Profiles", adminProfileList(profiles, csrf)));
   }
 
   if (path === "/admin/profiles/new" && method === "GET") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
-    return htmlResponse(layout("Add Profile", adminProfileForm(null)));
+    const csrf = await getCsrfToken(request);
+    return htmlResponse(layout("Add Profile", adminProfileForm(null, undefined, csrf)));
   }
 
   if (path === "/admin/profiles/new" && method === "POST") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
+    if (!(await validateCsrf(request))) return csrfForbidden();
     const form = await request.formData();
     const name = form.get("name");
     const email = form.get("email");
     const avatar = form.get("avatar");
     const pin = form.get("pin");
+    const csrf = await getCsrfToken(request);
     if (
       typeof name !== "string" || !name.trim() ||
       typeof email !== "string" || !email.trim() ||
       typeof avatar !== "string" || !avatar.trim() ||
       typeof pin !== "string" || !pin.trim()
     ) {
-      return htmlResponse(layout("Add Profile", adminProfileForm(null, "All fields are required.")));
+      return htmlResponse(layout("Add Profile", adminProfileForm(null, "All fields are required.", csrf)));
     }
     if (pin.trim().length < 4) {
-      return htmlResponse(layout("Add Profile", adminProfileForm(null, "PIN must be at least 4 characters.")));
+      return htmlResponse(layout("Add Profile", adminProfileForm(null, "PIN must be at least 4 characters.", csrf)));
     }
     const { hash, salt } = await hashPin(pin);
     await createProfile(env.DB, {
@@ -130,22 +176,25 @@ export async function handleAdmin(
 
   const profileEditMatch = path.match(/^\/admin\/profiles\/([^/]+)$/);
   if (profileEditMatch) {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
     const id = profileEditMatch[1];
 
     if (method === "GET") {
       const profile = await getProfile(env.DB, id);
       if (!profile) return new Response("Not found", { status: 404 });
-      return htmlResponse(layout("Edit Profile", adminProfileForm(profile)));
+      const csrf = await getCsrfToken(request);
+      return htmlResponse(layout("Edit Profile", adminProfileForm(profile, undefined, csrf)));
     }
 
     if (method === "POST") {
+      if (!(await validateCsrf(request))) return csrfForbidden();
       const form = await request.formData();
       const name = form.get("name");
       const email = form.get("email");
       const avatar = form.get("avatar");
       const pin = form.get("pin");
+      const csrf = await getCsrfToken(request);
       if (
         typeof name !== "string" || !name.trim() ||
         typeof email !== "string" || !email.trim() ||
@@ -153,7 +202,7 @@ export async function handleAdmin(
       ) {
         const profile = await getProfile(env.DB, id);
         return htmlResponse(
-          layout("Edit Profile", adminProfileForm(profile ?? null, "Name, email, and avatar are required."))
+          layout("Edit Profile", adminProfileForm(profile ?? null, "Name, email, and avatar are required.", csrf))
         );
       }
       const updates: Record<string, string> = {
@@ -165,7 +214,7 @@ export async function handleAdmin(
         if (pin.trim().length < 4) {
           const profile = await getProfile(env.DB, id);
           return htmlResponse(
-            layout("Edit Profile", adminProfileForm(profile ?? null, "PIN must be at least 4 characters."))
+            layout("Edit Profile", adminProfileForm(profile ?? null, "PIN must be at least 4 characters.", csrf))
           );
         }
         const { hash, salt } = await hashPin(pin.trim());
@@ -179,29 +228,32 @@ export async function handleAdmin(
 
   const profileDeleteMatch = path.match(/^\/admin\/profiles\/([^/]+)\/delete$/);
   if (profileDeleteMatch && method === "POST") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
+    if (!(await validateCsrf(request))) return csrfForbidden();
     await deleteProfile(env.DB, profileDeleteMatch[1]);
     return redirect("/admin");
   }
 
   if (path === "/admin/attempts" && method === "GET") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
+    const csrf = await getCsrfToken(request);
     const attempts = await listLoginAttempts(env.DB);
-    return htmlResponse(layout("Login Attempts", adminAttempts(attempts)));
+    return htmlResponse(layout("Login Attempts", adminAttempts(attempts, csrf)));
   }
 
   const unlockMatch = path.match(/^\/admin\/attempts\/(.+)\/unlock$/);
   if (unlockMatch && method === "POST") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
+    if (!(await validateCsrf(request))) return csrfForbidden();
     await unlockAttempt(env.DB, decodeURIComponent(unlockMatch[1]));
     return redirect("/admin/attempts");
   }
 
   if (path === "/admin/setup" && method === "GET") {
-    const authRedirect = requireAuth(request, env);
+    const authRedirect = await requireAuth(request, env);
     if (authRedirect) return authRedirect;
     const origin = url.origin;
 

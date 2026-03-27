@@ -221,8 +221,10 @@ export function adminLogin(error?: string): string {
 }
 
 export function adminProfileList(
-  profiles: Array<{ id: string; name: string; email: string; avatar: string; created_at: string }>
+  profiles: Array<{ id: string; name: string; email: string; avatar: string; created_at: string }>,
+  csrfToken?: string
 ): string {
+  const csrfField = csrfToken ? `<input type="hidden" name="_csrf" value="${escHtml(csrfToken)}" />` : "";
   const rows = profiles
     .map(
       (p) => `
@@ -235,6 +237,7 @@ export function adminProfileList(
         <a href="/admin/profiles/${escHtml(p.id)}" class="btn btn-sm" style="margin-right:0.4rem;">Edit</a>
         <form method="POST" action="/admin/profiles/${escHtml(p.id)}/delete" style="display:inline;"
           onsubmit="return confirm('Delete ${escHtml(p.name)}?')">
+          ${csrfField}
           <button type="submit" class="btn btn-sm btn-danger">Delete</button>
         </form>
       </td>
@@ -263,12 +266,14 @@ export function adminProfileList(
 
 export function adminProfileForm(
   profile?: { id: string; name: string; email: string; avatar: string } | null,
-  error?: string
+  error?: string,
+  csrfToken?: string
 ): string {
   const isEdit = profile != null;
   const action = isEdit ? `/admin/profiles/${escHtml(profile.id)}` : "/admin/profiles/new";
   const title = isEdit ? "Edit Profile" : "Add Profile";
   const errorHtml = error ? `<div class="error-box">${escHtml(error)}</div>` : "";
+  const csrfField = csrfToken ? `<input type="hidden" name="_csrf" value="${escHtml(csrfToken)}" />` : "";
 
   return `
     <div style="max-width:480px;margin:2rem auto;padding:0 1rem;">
@@ -279,6 +284,7 @@ export function adminProfileForm(
         <h2 style="margin-bottom:1.5rem;">${escHtml(title)}</h2>
         ${errorHtml}
         <form method="POST" action="${action}">
+          ${csrfField}
           <div class="field">
             <label for="name">Name</label>
             <input id="name" name="name" type="text" required value="${isEdit ? escHtml(profile.name) : ""}" />
@@ -307,8 +313,10 @@ export function adminAttempts(
     attempts: number;
     locked_until: string | null;
     updated_at: string;
-  }>
+  }>,
+  csrfToken?: string
 ): string {
+  const csrfField = csrfToken ? `<input type="hidden" name="_csrf" value="${escHtml(csrfToken)}" />` : "";
   const rows = attempts
     .map((a) => {
       const lockedCell = a.locked_until
@@ -316,6 +324,7 @@ export function adminAttempts(
         : '<span style="color:#888;">&mdash;</span>';
       const unlockBtn = a.locked_until
         ? `<form method="POST" action="/admin/attempts/${encodeURIComponent(a.key)}/unlock" style="display:inline;">
+             ${csrfField}
              <button type="submit" class="btn btn-sm">Unlock</button>
            </form>`
         : "";
@@ -371,14 +380,8 @@ export function adminSetup(data: SetupData): string {
       <tr>
         <td style="font-weight:600;white-space:nowrap;padding-right:1rem;">${escHtml(label)}</td>
         <td style="display:flex;align-items:center;gap:0.5rem;">
-          <code id="${id}-value" style="background:#EEF2F7;padding:0.25rem 0.5rem;border-radius:6px;font-size:0.95rem;word-break:break-all;">${"•".repeat(12)}</code>
-          <button type="button" onclick="
-            var v=document.getElementById('${id}-value');
-            var h=this.dataset.hidden==='1';
-            v.textContent=h?'${"•".repeat(12)}':'${escHtml(value)}';
-            this.textContent=h?'👁':'👁‍🗨';
-            this.dataset.hidden=h?'0':'1';
-          " data-hidden="0" style="background:none;border:none;cursor:pointer;font-size:1.1rem;padding:0.25rem;" title="Show/hide">👁</button>
+          <code id="${id}-value" data-secret="${escHtml(value)}" data-masked="${"•".repeat(12)}" style="background:#EEF2F7;padding:0.25rem 0.5rem;border-radius:6px;font-size:0.95rem;word-break:break-all;">${"•".repeat(12)}</code>
+          <button type="button" class="secret-toggle" data-target="${id}-value" data-hidden="0" style="background:none;border:none;cursor:pointer;font-size:1.1rem;padding:0.25rem;" title="Show/hide">👁</button>
         </td>
       </tr>`;
   }
@@ -400,6 +403,19 @@ export function adminSetup(data: SetupData): string {
         <code>wrangler secret put SIGNING_KEY</code>
       </div>`;
 
+  const toggleScript = `
+    <script>
+      document.querySelectorAll('.secret-toggle').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var el = document.getElementById(btn.getAttribute('data-target'));
+          var hidden = btn.getAttribute('data-hidden') === '1';
+          el.textContent = hidden ? el.getAttribute('data-masked') : el.getAttribute('data-secret');
+          btn.textContent = hidden ? '👁' : '👁\u200d🗨';
+          btn.setAttribute('data-hidden', hidden ? '0' : '1');
+        });
+      });
+    </script>`;
+
   return `
     <div style="max-width:680px;margin:2rem auto;padding:0 1rem;">
       <h2 style="margin-bottom:1.25rem;">OIDC Setup</h2>
@@ -417,5 +433,6 @@ export function adminSetup(data: SetupData): string {
         </table>
       </div>
       ${warning}
-    </div>`;
+    </div>
+    ${toggleScript}`;
 }

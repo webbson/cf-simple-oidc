@@ -1,5 +1,22 @@
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+export function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const aBuf = encoder.encode(a);
+  const bBuf = encoder.encode(b);
+  if (aBuf.byteLength !== bBuf.byteLength) {
+    // Compare b against itself to keep constant time, then return false
+    const dummy = new Uint8Array(bBuf.byteLength);
+    crypto.getRandomValues(dummy);
+    let x = 0;
+    for (let i = 0; i < bBuf.byteLength; i++) x |= dummy[i] ^ bBuf[i];
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < aBuf.byteLength; i++) diff |= aBuf[i] ^ bBuf[i];
+  return diff === 0;
+}
+
 function hexEncode(buf: ArrayBuffer): string {
   return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -37,7 +54,7 @@ export async function hashPin(pin: string): Promise<{ hash: string; salt: string
 
 export async function verifyPin(pin: string, hash: string, salt: string): Promise<boolean> {
   const derived = await deriveKey(pin, hexDecode(salt));
-  return hexEncode(derived) === hash;
+  return timingSafeEqual(hexEncode(derived), hash);
 }
 
 export function generateAuthCode(): string {

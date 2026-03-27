@@ -40,7 +40,7 @@ Single Worker with two route groups:
 - `src/oidc.ts` — OIDC protocol endpoints
 - `src/admin.ts` — Admin UI routes
 - `src/jwt.ts` — RSA keypair generation, JWT signing (RS256), JWKS export
-- `src/auth.ts` — PIN hashing (PBKDF2), rate limiting, auth code generation, ULID
+- `src/auth.ts` — PIN hashing (PBKDF2), rate limiting, auth code generation, ULID, constant-time comparison
 - `src/db.ts` — All D1 queries (single DB access layer)
 - `src/html.ts` — Server-rendered HTML templates
 
@@ -55,16 +55,17 @@ Kid visits protected app → CF Zero Trust redirects to /authorize
 
 ## Database
 
-D1 (SQLite). Tables: `profiles`, `auth_codes`, `login_attempts`.
+D1 (SQLite). Tables: `profiles`, `auth_codes`, `login_attempts`, `admin_sessions`.
 
-Run migration:
+Run migrations:
 ```bash
 wrangler d1 execute family-oidc-db --local --file=migrations/0001_init.sql
+wrangler d1 execute family-oidc-db --local --file=migrations/0002_admin_sessions.sql
 ```
 
 ## Environment
 
-- `.dev.vars` — `ADMIN_PASSWORD`, `CLIENT_ID`, `CLIENT_SECRET`, `SIGNING_KEY` (see `.dev.vars.example`)
+- `.dev.vars` — `ADMIN_PASSWORD`, `CLIENT_ID`, `CLIENT_SECRET`, `SIGNING_KEY`, `ALLOWED_REDIRECT_URIS` (see `.dev.vars.example`)
 - `wrangler.jsonc` — D1 binding (see `wrangler.jsonc.example`)
 - Secrets in prod: `wrangler secret put <NAME>`
 
@@ -77,5 +78,11 @@ wrangler d1 execute family-oidc-db --local --file=migrations/0001_init.sql
 - Auth codes are single-use, 60-second TTL — consumed atomically via `UPDATE ... RETURNING`
 - Rate limiting uses key-based rows (`ip:<addr>` or `profile:<id>`) for clean ON CONFLICT upserts
 - PIN hashing uses PBKDF2 with SHA-256, 100k iterations, 16-byte random salt
-- Admin session is a cookie storing the password — acceptable for a family admin panel over HTTPS
+- Admin session uses a random token stored in D1 (`admin_sessions` table), not the password
+- Admin forms are CSRF-protected via token derived from session
+- All secret comparisons use constant-time comparison (`timingSafeEqual`)
+- `redirect_uri` is validated against `ALLOWED_REDIRECT_URIS` env var (comma-separated)
+- PKCE (`code_challenge`/`code_verifier`) is fully validated on token exchange
+- Security headers (CSP, X-Frame-Options, X-Content-Type-Options) are applied to all responses
+- `login_attempts` rows older than 10 days are auto-cleaned during auth code issuance
 - The `profilePicker` links to `/authorize/pin/:id` but the PIN form POSTs back to `/authorize` — the GET path with `/pin/` is just for displaying the PIN entry screen for a specific profile

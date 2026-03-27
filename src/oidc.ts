@@ -1,10 +1,11 @@
-import { signJwt, getJwks } from "./jwt";
+import { signJwt, getJwks, base64urlEncode } from "./jwt";
 import {
   verifyPin,
   generateAuthCode,
   checkRateLimit,
   recordFailedAttempt,
   resetAttempts,
+  timingSafeEqual,
 } from "./auth";
 import {
   listProfiles,
@@ -12,6 +13,7 @@ import {
   createAuthCode,
   consumeAuthCode,
   cleanExpiredCodes,
+  cleanOldAttempts,
 } from "./db";
 import { layout, profilePicker, pinEntry, lockoutPage } from "./html";
 
@@ -20,6 +22,13 @@ interface Env {
   CLIENT_ID: string;
   CLIENT_SECRET: string;
   SIGNING_KEY: string;
+  ALLOWED_REDIRECT_URIS: string;
+}
+
+function isRedirectUriAllowed(uri: string, env: Env): boolean {
+  if (!env.ALLOWED_REDIRECT_URIS) return false;
+  const allowed = env.ALLOWED_REDIRECT_URIS.split(",").map((u) => u.trim());
+  return allowed.includes(uri);
 }
 
 export function handleDiscovery(request: Request, _env: Env): Response {
@@ -65,10 +74,18 @@ export async function handleAuthorize(
   if (request.method === "GET" && path === "/authorize") {
     const clientId = url.searchParams.get("client_id");
     const responseType = url.searchParams.get("response_type");
+    const redirectUri = url.searchParams.get("redirect_uri");
 
     if (clientId !== env.CLIENT_ID || responseType !== "code") {
       return new Response(
         layout("Error", "<div style='max-width:420px;margin:4rem auto;padding:0 1rem;'><div class='card center'><p>Invalid authorization request.</p></div></div>", { hideNav: true }),
+        { status: 400, headers: { "Content-Type": "text/html" } }
+      );
+    }
+
+    if (!redirectUri || !isRedirectUriAllowed(redirectUri, env)) {
+      return new Response(
+        layout("Error", "<div style='max-width:420px;margin:4rem auto;padding:0 1rem;'><div class='card center'><p>Invalid redirect URI.</p></div></div>", { hideNav: true }),
         { status: 400, headers: { "Content-Type": "text/html" } }
       );
     }
@@ -89,6 +106,13 @@ export async function handleAuthorize(
     const scope = body.get("scope") as string | null;
     const codeChallenge = body.get("code_challenge") as string | null;
     const codeChallengeMethod = body.get("code_challenge_method") as string | null;
+
+    if (!redirectUri || !isRedirectUriAllowed(redirectUri, env)) {
+      return new Response(
+        layout("Error", "<div style='max-width:420px;margin:4rem auto;padding:0 1rem;'><div class='card center'><p>Invalid redirect URI.</p></div></div>", { hideNav: true }),
+        { status: 400, headers: { "Content-Type": "text/html" } }
+      );
+    }
 
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
 
@@ -149,6 +173,7 @@ export async function handleAuthorize(
       code_challenge_method: codeChallengeMethod ?? undefined,
     });
     await cleanExpiredCodes(env.DB);
+    await cleanOldAttempts(env.DB);
 
     const redirectUrl = new URL(redirectUri);
     redirectUrl.searchParams.set("code", code);
@@ -198,7 +223,7 @@ export async function handleToken(
     return errorJson("unsupported_grant_type", "Only authorization_code grant type is supported.", 400);
   }
 
-  if (clientId !== env.CLIENT_ID || clientSecret !== env.CLIENT_SECRET) {
+  if (!clientId || !clientSecret || !timingSafeEqual(clientId, env.CLIENT_ID) || !timingSafeEqual(clientSecret, env.CLIENT_SECRET)) {
     return errorJson("invalid_client", "Client authentication failed.", 401);
   }
 
@@ -213,6 +238,26 @@ export async function handleToken(
 
   if (authCode.redirect_uri !== redirectUri) {
     return errorJson("invalid_grant", "redirect_uri does not match.", 400);
+  }
+
+  if (authCode.code_challenge) {
+    const codeVerifier = body.get("code_verifier") as string | null;
+    if (!codeVerifier) {
+      return errorJson("invalid_grant", "code_verifier is required when code_challenge was used.", 400);
+    }
+    const method = authCode.code_challenge_method ?? "S256";
+    let computedChallenge: string;
+    if (method === "S256") {
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier));
+      computedChallenge = base64urlEncode(hash);
+    } else if (method === "plain") {
+      computedChallenge = codeVerifier;
+    } else {
+      return errorJson("invalid_grant", "Unsupported code_challenge_method.", 400);
+    }
+    if (!timingSafeEqual(computedChallenge, authCode.code_challenge)) {
+      return errorJson("invalid_grant", "code_verifier validation failed.", 400);
+    }
   }
 
   const profile = await getProfile(env.DB, authCode.profile_id);
