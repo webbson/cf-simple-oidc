@@ -180,3 +180,64 @@ export async function resetAttempts(
     db.prepare(`DELETE FROM login_attempts WHERE key = ?`).bind(profileKey(profileId)),
   ]);
 }
+
+function adminKey(ip: string): string {
+  return `admin:${ip}`;
+}
+
+export async function checkAdminRateLimit(
+  db: D1Database,
+  ip: string
+): Promise<RateLimitResult> {
+  const row = await db
+    .prepare(
+      `SELECT locked_until FROM login_attempts
+       WHERE key = ? AND locked_until > datetime('now')`
+    )
+    .bind(adminKey(ip))
+    .first<{ locked_until: string }>();
+
+  if (row) {
+    return {
+      allowed: false,
+      lockedUntil: row.locked_until,
+      remainingMinutes: minutesUntil(row.locked_until),
+    };
+  }
+  return { allowed: true };
+}
+
+export async function recordAdminFailedAttempt(
+  db: D1Database,
+  ip: string
+): Promise<RateLimitResult> {
+  const now = new Date().toISOString().replace("Z", "");
+  await db
+    .prepare(
+      `INSERT INTO login_attempts (key, attempts, updated_at)
+       VALUES (?, 1, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         attempts = login_attempts.attempts + 1,
+         locked_until = CASE WHEN login_attempts.attempts + 1 >= 2
+           THEN datetime('now', '+60 minutes') ELSE login_attempts.locked_until END,
+         updated_at = excluded.updated_at`
+    )
+    .bind(adminKey(ip), now)
+    .run();
+
+  const row = await db
+    .prepare(
+      `SELECT attempts, locked_until FROM login_attempts WHERE key = ?`
+    )
+    .bind(adminKey(ip))
+    .first<{ attempts: number; locked_until: string | null }>();
+
+  if (row?.locked_until) {
+    return {
+      allowed: false,
+      lockedUntil: row.locked_until,
+      remainingMinutes: minutesUntil(row.locked_until),
+    };
+  }
+  return { allowed: true, remainingAttempts: row ? Math.max(0, 2 - row.attempts) : 1 };
+}

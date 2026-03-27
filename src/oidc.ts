@@ -44,8 +44,25 @@ export async function handleAuthorize(
   request: Request,
   env: Env
 ): Promise<Response> {
-  if (request.method === "GET") {
-    const url = new URL(request.url);
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // GET /authorize/pin/:id — show PIN entry for a specific profile
+  const pinMatch = path.match(/^\/authorize\/pin\/([^/]+)$/);
+  if (pinMatch && request.method === "GET") {
+    const profileId = pinMatch[1];
+    const profile = await getProfile(env.DB, profileId);
+    if (!profile) {
+      return new Response(
+        layout("Error", "<div style='max-width:420px;margin:4rem auto;padding:0 1rem;'><div class='card center'><p>Profile not found.</p></div></div>", { hideNav: true }),
+        { status: 404, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    const html = layout("Enter PIN", pinEntry(profile, url.search), { hideNav: true });
+    return new Response(html, { headers: { "Content-Type": "text/html" } });
+  }
+
+  if (request.method === "GET" && path === "/authorize") {
     const clientId = url.searchParams.get("client_id");
     const responseType = url.searchParams.get("response_type");
 

@@ -293,7 +293,7 @@ export function adminProfileForm(
           </div>
           <div class="field">
             <label for="pin">PIN${isEdit ? " (leave blank to keep current)" : ""}</label>
-            <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" ${isEdit ? "" : "required"} />
+            <input id="pin" name="pin" type="password" minlength="4" ${isEdit ? "" : "required"} />
           </div>
           <button type="submit" class="btn" style="width:100%;">${isEdit ? "Save Changes" : "Create Profile"}</button>
         </form>
@@ -365,10 +365,28 @@ export function adminSetup(data: SetupData): string {
       </tr>`;
   }
 
+  function secretRow(label: string, value: string): string {
+    const id = label.replace(/\s+/g, "-").toLowerCase();
+    return `
+      <tr>
+        <td style="font-weight:600;white-space:nowrap;padding-right:1rem;">${escHtml(label)}</td>
+        <td style="display:flex;align-items:center;gap:0.5rem;">
+          <code id="${id}-value" style="background:#EEF2F7;padding:0.25rem 0.5rem;border-radius:6px;font-size:0.95rem;word-break:break-all;">${"•".repeat(12)}</code>
+          <button type="button" onclick="
+            var v=document.getElementById('${id}-value');
+            var h=this.dataset.hidden==='1';
+            v.textContent=h?'${"•".repeat(12)}':'${escHtml(value)}';
+            this.textContent=h?'👁':'👁‍🗨';
+            this.dataset.hidden=h?'0':'1';
+          " data-hidden="0" style="background:none;border:none;cursor:pointer;font-size:1.1rem;padding:0.25rem;" title="Show/hide">👁</button>
+        </td>
+      </tr>`;
+  }
+
   const secretRows = data.alreadyConfigured
-    ? ""
+    ? (data.clientSecret ? secretRow("Client Secret", data.clientSecret) : "")
     : `
-      ${row("Client Secret", data.clientSecret ?? "")}
+      ${secretRow("Client Secret", data.clientSecret ?? "")}
       ${data.signingKey ? row("SIGNING_KEY", data.signingKey) : ""}`;
 
   const warning = data.alreadyConfigured

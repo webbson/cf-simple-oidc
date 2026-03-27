@@ -1,4 +1,4 @@
-import { hashPin, generateClientCredentials } from "./auth";
+import { hashPin, generateClientCredentials, checkAdminRateLimit, recordAdminFailedAttempt } from "./auth";
 import {
   listProfiles,
   getProfile,
@@ -16,6 +16,7 @@ import {
   adminProfileForm,
   adminAttempts,
   adminSetup,
+  lockoutPage,
 } from "./html";
 
 interface Env {
@@ -61,9 +62,18 @@ export async function handleAdmin(
   }
 
   if (path === "/admin/login" && method === "POST") {
+    const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+    const rateCheck = await checkAdminRateLimit(env.DB, ip);
+    if (!rateCheck.allowed) {
+      return htmlResponse(layout("Locked Out", lockoutPage(rateCheck.remainingMinutes ?? 60), { hideNav: true }));
+    }
     const form = await request.formData();
     const password = form.get("password");
     if (typeof password !== "string" || password !== env.ADMIN_PASSWORD) {
+      const result = await recordAdminFailedAttempt(env.DB, ip);
+      if (!result.allowed) {
+        return htmlResponse(layout("Locked Out", lockoutPage(result.remainingMinutes ?? 60), { hideNav: true }));
+      }
       return htmlResponse(layout("Admin Login", adminLogin("Invalid password."), { hideNav: true }));
     }
     return new Response(null, {
@@ -103,6 +113,9 @@ export async function handleAdmin(
       typeof pin !== "string" || !pin.trim()
     ) {
       return htmlResponse(layout("Add Profile", adminProfileForm(null, "All fields are required.")));
+    }
+    if (pin.trim().length < 4) {
+      return htmlResponse(layout("Add Profile", adminProfileForm(null, "PIN must be at least 4 characters.")));
     }
     const { hash, salt } = await hashPin(pin);
     await createProfile(env.DB, {
@@ -149,6 +162,12 @@ export async function handleAdmin(
         avatar: avatar.trim(),
       };
       if (typeof pin === "string" && pin.trim()) {
+        if (pin.trim().length < 4) {
+          const profile = await getProfile(env.DB, id);
+          return htmlResponse(
+            layout("Edit Profile", adminProfileForm(profile ?? null, "PIN must be at least 4 characters."))
+          );
+        }
         const { hash, salt } = await hashPin(pin.trim());
         updates.pin_hash = hash;
         updates.pin_salt = salt;
@@ -191,6 +210,7 @@ export async function handleAdmin(
         layout("Setup", adminSetup({
           alreadyConfigured: true,
           clientId: env.CLIENT_ID,
+          clientSecret: env.CLIENT_SECRET,
           authUrl: `${origin}/authorize`,
           tokenUrl: `${origin}/token`,
           certsUrl: `${origin}/jwks`,

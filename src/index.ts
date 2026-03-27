@@ -19,7 +19,7 @@ export default {
 				return handleDiscovery(request, env);
 			}
 
-			if (path === '/authorize') {
+			if (path === '/authorize' || path.startsWith('/authorize/')) {
 				return handleAuthorize(request, env);
 			}
 
